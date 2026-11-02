@@ -9,13 +9,12 @@ import json
 class EPGGoldEngine:
     def __init__(self, target_lang="ar"):
         self.db_path = "/etc/enigma2/epggold_cache.db"
-        self.target_lang = target_lang # اللغة المستهدفة (ar أو en)
+        self.target_lang = target_lang # لغة الهدف (ar أو en)
         self.init_db()
 
     def init_db(self):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        # جعل المفتاح الأساسي مركب من النص الأصلي ولغة الهدف
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS translations (
                 original TEXT,
@@ -47,12 +46,12 @@ class EPGGoldEngine:
         if not text or not text.strip():
             return text
 
-        # 1. البحث في الكاش المحلي أولاً
+        # 1. البحث في الكاش المحلي أولاً لتوفير الوقت والإنترنت
         cached = self.get_translation_from_cache(text)
         if cached:
             return cached
 
-        # 2. الترجمة من أي لغة (auto) إلى اللغة المستهدفة (ar أو en)
+        # 2. الترجمة عبر محرك جوجل (اكتشاف تلقائي للغة المصدر -> للغة المستهدفة)
         try:
             base_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={self.target_lang}&dt=t&q="
             encoded_text = urllib.parse.quote(text)
@@ -63,10 +62,10 @@ class EPGGoldEngine:
                 result = json.loads(response.read().decode('utf-8'))
                 translated = "".join([item[0] for item in result[0] if item[0]])
         except Exception:
-            # لو حصل خطأ في الاتصال، يرجع النص الأصلي
+            # في حال عدم وجود انترنت أو حدوث خطأ، يرجع النص الأصلي بدون تهنيج
             translated = text
 
-        # 3. حفظ النتيجة في الكاش
+        # 3. حفظ الترجمة الجديدة في الكاش
         self.save_to_cache(text, translated)
         return translated
 
@@ -74,6 +73,7 @@ class EPGGoldEngine:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"الملف غير موجود: {file_path}")
 
+        # قراءة الملف (سواء كان XML عادي أو مضغوط GZ)
         if file_path.endswith('.gz'):
             with gzip.open(file_path, 'rt', encoding='utf-8') as f:
                 tree = ET.parse(f)
@@ -82,6 +82,7 @@ class EPGGoldEngine:
 
         root = tree.getroot()
 
+        # معالجة وسوم البرامج (العنوان والوصف)
         for programme in root.findall('programme'):
             title = programme.find('title')
             desc = programme.find('desc')
@@ -92,6 +93,7 @@ class EPGGoldEngine:
             if desc is not None and desc.text:
                 desc.text = self.translate_text(desc.text)
 
+        # حفظ الملف الناتج بنسخة جديدة مع تحديد لغة الترجمة في الاسم
         output_path = file_path.replace('.xml', f'_gold_{self.target_lang}.xml')
         tree.write(output_path, encoding='utf-8', xml_declaration=True)
         return output_path
