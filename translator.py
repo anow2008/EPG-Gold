@@ -213,3 +213,137 @@ class EPGGoldEngine:
 
         os.replace(tmp_path, output_path)
         return output_path
+
+
+# =====================================================================
+#  قراءة الدليل من الرسيفر مباشرة (بدل تحليل ملف epg.dat الثنائي)
+# =====================================================================
+import re
+
+_BAD_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x86\x87]")
+
+
+def clean_text(s):
+    """يشيل رموز التحكم اللي بتبوظ XML ويحوّل رمز السطر الجديد بتاع DVB."""
+    if not s:
+        return ""
+    return _BAD_CHARS.sub("", s.replace("\ue08a", "\n"))
+
+
+def get_epg_services():
+    """قائمة (service_ref, name) من كل الباقات بدون تكرار وبدون الفواصل."""
+    from enigma import eServiceCenter, eServiceReference
+    sc = eServiceCenter.getInstance()
+    root = eServiceReference('1:7:1:0:0:0:0:0:0:0:FROM BOUQUET "bouquets.tv" ORDER BY bouquet')
+    bouquets = sc.list(root)
+    result, seen = [], set()
+    if bouquets is None:
+        return result
+    for bref, _bname in bouquets.getContent("SN", True):
+        slist = sc.list(eServiceReference(bref))
+        if slist is None:
+            continue
+        for sref, name in slist.getContent("SN", True):
+            parts = sref.split(":")
+            # قنوات عادية فقط (تخطي الفواصل والمجلدات والـ IPTV)
+            if len(parts) < 3 or parts[0] != "1" or parts[1] != "0":
+                continue
+            if sref in seen:
+                continue
+            seen.add(sref)
+            result.append((sref, name))
+    return result
+
+
+class EPGDatExporter:
+    """
+    بيقرا الأحداث من كاش الـ EPG الشغال في الرسيفر (نفس بيانات epg.dat)
+    ويكتبها كملف XMLTV + ملف channels جاهز لـ EPGImport.
+    لازم يشتغل في الـ thread الرئيسي، على دفعات (step) عشان الواجهة متهنجش.
+    """
+
+    def __init__(self, export_path, channels_path):
+        self.export_path = export_path
+        self.channels_path = channels_path
+        self.services = []
+        self.idx = 0
+        self.events = 0
+        self.channels = []   # (id, service_ref)
+        self.fh = None
+        self.epg = None
+        self.finished = False
+
+    @property
+    def total(self):
+        return len(self.services)
+
+    def start(self):
+        from enigma import eEPGCache
+        self.epg = eEPGCache.getInstance()
+        self.services = get_epg_services()
+        if not self.services:
+            raise RuntimeError("لم يتم العثور على قنوات في الباقات")
+        self.fh = open(self.export_path + ".tmp", "w", encoding="utf-8")
+        self.fh.write("<?xml version='1.0' encoding='utf-8'?>\n"
+                      "<tv generator-info-name=\"EPG Gold\">\n")
+
+    def step(self, n=25):
+        """يعالج n قناة. بيرجّع True لما يخلص كل القنوات."""
+        end = min(self.idx + n, len(self.services))
+        for sref, name in self.services[self.idx:end]:
+            try:
+                events = self.epg.lookupEvent(["IBDTSE", (sref, 0, -1, -1)]) or []
+            except Exception as e:
+                log("lookupEvent error %s: %r" % (sref, e))
+                events = []
+            rows = []
+            for ev in events:
+                try:
+                    _eid, begin, dur, title, short, ext = ev
+                except Exception:
+                    continue
+                if not begin or dur is None or not title:
+                    continue
+                rows.append((begin, dur, clean_text(title),
+                             clean_text(ext) or clean_text(short)))
+            if not rows:
+                continue
+            cid = sref.replace(":", "_").rstrip("_")
+            self.channels.append((cid, sref))
+            self.fh.write("<channel id=%s><display-name>%s</display-name></channel>\n"
+                          % (quoteattr(cid), escape(clean_text(name))))
+            for begin, dur, title, desc in rows:
+                start = time.strftime("%Y%m%d%H%M%S +0000", time.gmtime(begin))
+                stop = time.strftime("%Y%m%d%H%M%S +0000", time.gmtime(begin + dur))
+                self.fh.write("<programme start=%s stop=%s channel=%s><title>%s</title>"
+                              % (quoteattr(start), quoteattr(stop), quoteattr(cid), escape(title)))
+                if desc:
+                    self.fh.write("<desc>%s</desc>" % escape(desc))
+                self.fh.write("</programme>\n")
+                self.events += 1
+        self.idx = end
+        return self.idx >= len(self.services)
+
+    def finish(self):
+        self.fh.write("</tv>\n")
+        self.fh.close()
+        self.fh = None
+        os.replace(self.export_path + ".tmp", self.export_path)
+        with open(self.channels_path, "w", encoding="utf-8") as f:
+            f.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<channels>\n")
+            for cid, sref in self.channels:
+                f.write("  <channel id=%s>%s</channel>\n" % (quoteattr(cid), escape(sref)))
+            f.write("</channels>\n")
+        self.finished = True
+
+    def abort(self):
+        if self.finished:
+            return
+        try:
+            if self.fh:
+                self.fh.close()
+                self.fh = None
+            if os.path.exists(self.export_path + ".tmp"):
+                os.remove(self.export_path + ".tmp")
+        except Exception:
+            pass
