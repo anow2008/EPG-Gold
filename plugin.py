@@ -255,7 +255,15 @@ class EPGGoldScreen(Screen, ConfigListScreen):
             except Exception:
                 pass
         self.temp_input = None
-        msg = "تمت الترجمة بنجاح.\nالملف: %s" % output_path
+        e = self.engine
+        msg = "انتهت المعالجة.\nالملف: %s" % output_path
+        if e:
+            msg += ("\n\nالملخص:\nبرامج: %d\nترجمات جديدة: %d | من الكاش: %d | متخطاة (بلغة الهدف): %d"
+                    % (e.programmes, e.translated, e.from_cache, e.skipped))
+            if e.sample:
+                msg += "\nمثال: %s  ->  %s" % e.sample
+            if e.translated == 0 and e.from_cache == 0:
+                msg += "\n\nتنبيه: لم تتم أي ترجمة فعلية! راجع الإنترنت و /tmp/epggold.log"
         if config.plugins.epggold.make_source.value:
             try:
                 src = write_epgimport_source(output_path, channels_file, lang)
