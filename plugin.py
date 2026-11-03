@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
+import os
 from Plugins.Plugin import PluginDescriptor
 from Screens.Screen import Screen
 from Screens.MessageBox import MessageBox
 from Components.ActionMap import ActionMap
 from Components.Label import Label
+from Components.FileList import FileList
 from Components.ConfigList import ConfigListScreen
 from Components.config import (config, ConfigSubsection, ConfigSelection,
                                ConfigText, ConfigYesNo, getConfigListEntry)
@@ -22,12 +24,47 @@ config.plugins.epggold.channels_file = ConfigText(
     default="/etc/epgimport/custom.channels.xml", fixed_size=False)
 
 
+class EPGGoldFileBrowser(Screen):
+    """شاشة اختيار ملف من الرسيفر."""
+    skin = """
+    <screen name="EPGGoldFileBrowser" position="center,center" size="700,460" title="EPG Gold - اختيار ملف">
+        <widget name="path" position="20,10" size="660,30" font="Regular;18" />
+        <widget name="filelist" position="20,50" size="660,350" itemHeight="30" scrollbarMode="showOnDemand" />
+        <widget name="hint" position="20,415" size="660,30" font="Regular;18" halign="center" />
+    </screen>"""
+
+    def __init__(self, session, start_dir, pattern):
+        Screen.__init__(self, session)
+        if not os.path.isdir(start_dir):
+            start_dir = "/"
+        self["filelist"] = FileList(start_dir, showDirectories=True,
+                                    showFiles=True, matchingPattern=pattern)
+        self["path"] = Label(start_dir)
+        self["hint"] = Label("OK: اختيار / دخول مجلد   |   الأحمر: إلغاء")
+        self["actions"] = ActionMap(["OkCancelActions", "ColorActions"], {
+            "ok": self.ok,
+            "cancel": self.cancel,
+            "red": self.cancel,
+        }, -1)
+
+    def ok(self):
+        fl = self["filelist"]
+        if fl.canDescent():
+            fl.descent()
+            self["path"].setText(fl.getCurrentDirectory() or "/")
+        else:
+            self.close(fl.getFilename())
+
+    def cancel(self):
+        self.close(None)
+
+
 class EPGGoldScreen(Screen, ConfigListScreen):
     skin = """
-    <screen name="EPGGoldScreen" position="center,center" size="700,400" title="EPG Gold">
+    <screen name="EPGGoldScreen" position="center,center" size="700,420" title="EPG Gold">
         <widget name="config" position="20,20" size="660,170" itemHeight="40" font="Regular;20" />
         <widget name="status" position="20,210" size="660,110" font="Regular;18" halign="center" valign="center"/>
-        <widget name="hint" position="20,340" size="660,40" font="Regular;18" halign="center" valign="center"/>
+        <widget name="hint" position="20,350" size="660,50" font="Regular;18" halign="center" valign="center"/>
     </screen>"""
 
     def __init__(self, session):
@@ -45,9 +82,10 @@ class EPGGoldScreen(Screen, ConfigListScreen):
         ConfigListScreen.__init__(self, self.list, session=session)
 
         self["status"] = Label("جاهز.")
-        self["hint"] = Label("الأخضر: بدء الترجمة   |   الأحمر: خروج")
+        self["hint"] = Label("الأصفر: اختيار ملف من القائمة   |   الأخضر: بدء الترجمة   |   الأحمر: خروج")
         self["actions"] = ActionMap(["ColorActions", "SetupActions"], {
             "green": self.start_translation_process,
+            "yellow": self.browse,
             "red": self.exit_screen,
             "cancel": self.exit_screen,
         }, -2)
@@ -57,6 +95,38 @@ class EPGGoldScreen(Screen, ConfigListScreen):
             self.timer.callback.append(self.update_progress)
         except AttributeError:
             self.timer_conn = self.timer.timeout.connect(self.update_progress)
+
+    # ---------- اختيار الملفات ----------
+    def browse(self):
+        if self.busy:
+            return
+        current = self["config"].getCurrent()
+        element = current[1] if current else None
+        if element is config.plugins.epggold.input_file:
+            pattern = r"(?i)^.*\.(xml|gz)$"
+        elif element is config.plugins.epggold.channels_file:
+            pattern = r"(?i)^.*\.xml$"
+        else:
+            self.session.open(
+                MessageBox,
+                "اختار سطر (ملف EPG الأصلي) أو (ملف القنوات) الأول، وبعدين اضغط الأصفر.",
+                MessageBox.TYPE_INFO, timeout=5)
+            return
+        start = os.path.dirname(element.value) if element.value else "/media/hdd"
+        if not os.path.isdir(start):
+            start = "/media/hdd" if os.path.isdir("/media/hdd") else "/"
+        self.session.openWithCallback(
+            lambda path, el=element: self.file_selected(el, path),
+            EPGGoldFileBrowser, start, pattern)
+
+    def file_selected(self, element, path):
+        if not path:
+            return
+        element.value = path
+        try:
+            self["config"].invalidateCurrent()
+        except Exception:
+            self["config"].l.invalidate()
 
     # ---------- الواجهة ----------
     def exit_screen(self):
@@ -75,6 +145,11 @@ class EPGGoldScreen(Screen, ConfigListScreen):
     def start_translation_process(self):
         if self.busy:
             return
+        input_file = config.plugins.epggold.input_file.value
+        if not os.path.isfile(input_file):
+            self.session.open(MessageBox, "الملف غير موجود:\n%s\nاختاره بالزرار الأصفر." % input_file,
+                              MessageBox.TYPE_ERROR)
+            return
         for item in (config.plugins.epggold.language,
                      config.plugins.epggold.input_file,
                      config.plugins.epggold.make_source,
@@ -86,8 +161,7 @@ class EPGGoldScreen(Screen, ConfigListScreen):
         self["status"].setText("جاري البدء...")
         self.timer.start(1000, False)
 
-        d = deferToThread(self.run_engine, self.engine,
-                          config.plugins.epggold.input_file.value)
+        d = deferToThread(self.run_engine, self.engine, input_file)
         d.addCallback(self.on_done, lang)
         d.addErrback(self.on_error)
 
