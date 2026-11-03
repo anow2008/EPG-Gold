@@ -66,6 +66,7 @@ class EPGGoldEngine:
         self.translated = 0
         self.from_cache = 0
         self.skipped = 0
+        self.sample = None   # (الأصل, الترجمة) أول ترجمة ناجحة، للعرض في الملخص
 
     # ---------- الكاش ----------
     def _open_db(self):
@@ -150,6 +151,8 @@ class EPGGoldEngine:
             return text  # فشل: نرجع الأصل ومنحفظوش في الكاش
         self._cache_put(text, translated)
         self.translated += 1
+        if self.sample is None:
+            self.sample = (text[:40], translated[:40])
         return translated
 
     # ---------- معالجة الملف ----------
